@@ -204,9 +204,11 @@ def load_one(path: Path) -> pd.DataFrame:
         if path.suffix.lower() == ".parquet":
             df = pd.read_parquet(path)
         else:
+            # AUDIT-FIX 3: drop infer_datetime_format=True (removed in pandas 2.x).
+            # Modern pandas auto-infers; leaving the kwarg in raises TypeError.
             try:
-                df = pd.read_csv(path, parse_dates=["timestamp"], infer_datetime_format=True)
-            except ValueError:
+                df = pd.read_csv(path, parse_dates=["timestamp"])
+            except (ValueError, KeyError):
                 df = pd.read_csv(path)
     except Exception as e:
         raise RuntimeError(f"Load failed: {e}")
@@ -287,19 +289,35 @@ def discover_daily_features(df, exclude=None):
     Excludes: timestamp/date/symbol/raw OHLCV/return targets/calculation helpers/regime label.
     """
     exclude = set(exclude or [])
+    # AUDIT-FIX 5: extend NEVER_FEATURE so any forward-looking column or
+    # label-construction helper that happens to start with a feature prefix
+    # cannot slip in. mfe_*/mae_* are forward-looking, ret_*_oc/cc_pct are
+    # forward-looking, and vol_20/atr_pct/ret_*_adj are label-construction
+    # helpers that would otherwise trigger no prefix filter but are surfaced
+    # by build_5d_rank_quant_labels.
     NEVER_FEATURE = {
         "timestamp", "date", "year", "symbol", "instrument_token",
         "open", "high", "low", "close", "volume",
+        # Forward returns (labels)
         "ret_1d_close_pct", "ret_3d_close_pct", "ret_5d_close_pct",
-        "ret_5d_oc_pct", "ret_5d_adj", "rank_5d_pct",
-        "top20_vs_bot20_5d", "top20_strict_5d", "avg20_vol",
-        "stock_regime",  # the regime label we add — never a feature
+        "ret_1d_oc_pct", "ret_3d_oc_pct", "ret_5d_oc_pct",
+        # Label helpers / target-derived
+        "ret_5d_adj", "ret_3d_adj", "rank_5d_pct",
+        "top20_vs_bot20_5d", "top20_strict_5d",
+        # Universe / regime helpers
+        "avg20_vol", "stock_regime",
+        # Label-construction columns added by build_5d_rank_quant_labels
+        "vol_20", "atr_pct",
     }
+    # Forward-looking patterns: mfe_*/mae_* are MFE/MAE over future windows.
+    NEVER_FEATURE_PATTERNS = ("mfe_", "mae_")
     cols = []
     for c in df.columns:
         if not isinstance(c, str):
             continue
         if c in NEVER_FEATURE or c in exclude:
+            continue
+        if any(c.startswith(p) for p in NEVER_FEATURE_PATTERNS):
             continue
         if "__dup" in c:
             continue
@@ -402,31 +420,47 @@ class PanelParquetWriter:
         if not _PA_OK:
             raise SystemExit("pyarrow is required to write panel_cache.parquet. Please run: pip install pyarrow")
         self.out_path = out_path; self._writer = None; self._schema = None
+    # AUDIT-FIX 1: include EVERY feature prefix that discover_daily_features
+    # accepts so engineered features (X_*, W_*, WQ_*, Comb_*, DOW_*) are not
+    # silently dropped on parquet write. M_* and regime_* are added to the
+    # in-memory panel AFTER this writer runs, so listing them here is harmless
+    # but keeps the contract symmetric with discover_daily_features().
+    _FEATURE_PREFIXES = (
+        "D_", "W_", "WQ_", "M_", "X_", "Comb_",
+        "CPR_", "Struct_", "DayType_", "DOW_", "regime_",
+    )
+    _ONEHOT_PREFIXES = ("CPR_Yday_", "CPR_Tmr_", "Struct_", "DayType_")
+
     def write_chunk(self, df: pd.DataFrame):
         if df is None or df.empty: return
         dynamic_keep = list(dict.fromkeys(
-            MASTER_KEEP_STATIC + [c for c in df.columns if str(c).startswith(("D_","CPR_","Struct_","DayType_"))]
+            MASTER_KEEP_STATIC + [c for c in df.columns if str(c).startswith(self._FEATURE_PREFIXES)]
         ))
         for col in dynamic_keep:
             if col not in df.columns:
-                if (str(col).startswith(("CPR_","Struct_","DayType_"))):
+                if str(col).startswith(self._ONEHOT_PREFIXES):
                     df[col] = 0
                 else:
                     df[col] = np.nan
         df = df.copy()
         df["timestamp"] = ensure_kolkata_tz(pd.to_datetime(df["timestamp"], errors="coerce"))
         df["symbol"] = df["symbol"].astype(str).map(_clean_symbol_label)
-        onehot_prefixes = ("CPR_Yday_","CPR_Tmr_","Struct_","DayType_")
         for c in df.columns:
-            if str(c).startswith(onehot_prefixes):
+            if str(c).startswith(self._ONEHOT_PREFIXES):
                 if df[c].dtype == bool: df[c] = df[c].astype(np.int32)
                 else: df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).clip(lower=0, upper=1).astype(np.int32)
         numeric_like = ["open","high","low","close","volume",
                         "ret_1d_close_pct","ret_3d_close_pct","ret_5d_close_pct",
                         "ret_1d_oc_pct","ret_3d_oc_pct","ret_5d_oc_pct",
                         "long_score","short_score","D_atr14","D_cpr_width_pct"]
+        # Type-coerce ALL feature-prefix columns (not just D_/ret_/_pct) so that
+        # X_/W_/WQ_/Comb_/DOW_ columns get a stable float64 schema across chunks.
+        _NUMERIC_FEATURE_PREFIXES = ("D_","W_","WQ_","M_","X_","Comb_","DOW_","regime_")
         for c in df.columns:
-            if (c in numeric_like or str(c).startswith("D_") or str(c).startswith("ret_") or str(c).endswith("_pct")):
+            if (c in numeric_like
+                or str(c).startswith(_NUMERIC_FEATURE_PREFIXES)
+                or str(c).startswith("ret_")
+                or str(c).endswith("_pct")):
                 df[c] = pd.to_numeric(df[c], errors="coerce").astype(np.float64)
         for c in df.columns:
             if df[c].dtype == bool:
@@ -635,16 +669,17 @@ def _join_macro_features(panel: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             pass
         macro_cols = [c for c in macro.columns if c.startswith("M_")]
-        # panel has tz-aware date; convert to naive for join
-        panel_date_naive = pd.to_datetime(panel["date"]).dt.tz_localize(None) if hasattr(panel["date"].dt, "tz_localize") else panel["date"]
-        try:
-            panel["_join_date"] = pd.to_datetime(panel["date"]).dt.tz_convert(None).dt.normalize()
-        except Exception:
-            panel["_join_date"] = pd.to_datetime(panel["date"]).dt.normalize()
-            try:
-                panel["_join_date"] = panel["_join_date"].dt.tz_localize(None)
-            except Exception:
-                pass
+        # AUDIT-FIX 2: build _join_date so the panel row's IST date is preserved
+        # as a naive date (not shifted by tz_convert). The previous order
+        # `.dt.tz_convert(None).dt.normalize()` shifted IST midnight to UTC
+        # 18:30 of the prior day, then normalized to that prior date — joining
+        # yesterday's macro onto today's row. The correct order strips the tz
+        # while keeping the wall-clock date.
+        panel_date = pd.to_datetime(panel["date"])
+        if getattr(panel_date.dt, "tz", None) is not None:
+            panel["_join_date"] = panel_date.dt.tz_localize(None).dt.normalize()
+        else:
+            panel["_join_date"] = panel_date.dt.normalize()
         merged = panel.merge(
             macro[["date"] + macro_cols].rename(columns={"date": "_join_date"}),
             on="_join_date",
@@ -655,8 +690,13 @@ def _join_macro_features(panel: pd.DataFrame) -> pd.DataFrame:
         for c in macro_cols:
             merged[c] = pd.to_numeric(merged[c], errors="coerce")
             merged[c] = merged.groupby("symbol")[c].ffill()
-        n_with = merged[macro_cols[0]].notna().sum() if macro_cols else 0
-        print(f"[Macro] Joined {len(macro_cols)} macro features on {n_with:,} rows")
+        # AUDIT-FIX 2b: report coverage across ALL macro columns, not just the
+        # first one (which previously masked heterogeneous coverage).
+        if macro_cols:
+            cov = pd.concat([merged[c].notna() for c in macro_cols], axis=1).all(axis=1).sum()
+            print(f"[Macro] Joined {len(macro_cols)} macro features; full coverage on {int(cov):,} of {len(merged):,} rows")
+        else:
+            print(f"[Macro] Joined 0 macro features")
         return merged
     except Exception as e:
         print(f"[Macro] WARNING: join failed: {e}. Continuing without macro features.")
@@ -740,20 +780,11 @@ def _compute_strict_label(panel: pd.DataFrame) -> pd.DataFrame:
     fwd_close_5 = grp["close"].transform(lambda s: pd.to_numeric(s, errors="coerce").shift(-5))
 
     # Forward minimum LOW over t+1..t+5
-    low = pd.to_numeric(panel["low"], errors="coerce")
-    def _fwd_min_low(s):
-        s = pd.to_numeric(s, errors="coerce")
-        # shift(-1) gives day t+1; rolling-backward window of 5 starting at t+1
-        # Equivalent: take low at t+1..t+5 minimum -> shift(-5).rolling(5).min() does not align well
-        # Use reverse: build forward window manually
-        return s.shift(-5).rolling(5, min_periods=1).min().fillna(method="bfill")
-    # Simpler & correct: for each row, look at low.iloc[i+1:i+6].min()
-    # Vectorize via rolling on a shifted series
-    # We want: at row i, min(low[i+1], low[i+2], ..., low[i+5])
-    low_fwd_min = grp.apply(
-        lambda g: pd.to_numeric(g["low"], errors="coerce").shift(-5).rolling(5, min_periods=1).min().reindex_like(g["low"])
-    ).reset_index(level=0, drop=True)
-    # Cleaner reimplementation: shift each future day individually
+    # AUDIT-FIX 6: remove the dead first `low_fwd_min = grp.apply(...)` block.
+    # It was computed and then immediately overwritten 5 lines later by the
+    # explicit shift+concat below. The apply call was the slowest step in this
+    # function on a 4-5M row panel.
+    low = pd.to_numeric(panel["low"], errors="coerce")  # noqa: F841 (kept for diagnostic continuity)
     low_t1 = grp["low"].transform(lambda s: pd.to_numeric(s, errors="coerce").shift(-1))
     low_t2 = grp["low"].transform(lambda s: pd.to_numeric(s, errors="coerce").shift(-2))
     low_t3 = grp["low"].transform(lambda s: pd.to_numeric(s, errors="coerce").shift(-3))
@@ -1514,7 +1545,9 @@ def nightly_watchlist(panel: pd.DataFrame, feats: List[str],
     print(f"[Watchlist] Universe before scoring: {len(last):,} rows")
 
     feats_schema, impute_stats = load_schema(FEATURES_SCHEMA_PATH)
-    X_raw = sanitize_feature_matrix(last[feats_schema].copy())
+    # AUDIT-FIX 4: use reindex so a feature missing from the panel does not
+    # raise KeyError. reindex_and_impute below will fill via train-only medians.
+    X_raw = sanitize_feature_matrix(last.reindex(columns=feats_schema).copy())
     X = reindex_and_impute(X_raw, feats_schema, impute_stats)
 
     # Determine each row's regime
@@ -1759,13 +1792,23 @@ def _write_fallback_models(out_dir: str):
         print(f"[Models:FALLBACK] Saved: {paths['iso_ev']}")
 
 def _atexit_ensure_joblibs():
+    # AUDIT-FIX 7: previously this was atexit-registered. That meant a crash
+    # mid-training would silently fill the models/ dir with constant-probability
+    # stubs (m5_classifier→0.5, m1_gate→0.6, iso_ev→0), and any subsequent
+    # backtest/watchlist load would succeed against meaningless models. We now
+    # leave this as a callable helper but DO NOT auto-register it. The explicit
+    # call inside run_pipeline at successful completion is preserved and only
+    # fills genuinely-missing files (it never overwrites real artifacts).
     try:
         if _LAST_OUT_DIR:
             _write_fallback_models(_LAST_OUT_DIR)
     except Exception as e:
         print(f"[Models:FALLBACK] Failed to write fallback joblibs: {e!r}")
 
-atexit.register(_atexit_ensure_joblibs)
+# AUDIT-FIX 7: do NOT atexit-register the fallback writer. A failed training
+# run should leave missing files so downstream loads fail loudly instead of
+# returning constant-probability garbage.
+# atexit.register(_atexit_ensure_joblibs)  # intentionally disabled
 
 # ===================== PICKLE-SAFE EV SHIM (TOP LEVEL) =====================
 class EVShimRegressor:
@@ -1816,11 +1859,44 @@ def run_pipeline(*,
     panel, feats = collect_panel_from_paths(paths, load_workers=load_workers)
     feats = [f for f in feats if "__dup" not in f]
     assert not any("__dup" in f for f in feats)
+    # AUDIT-FIX 9: hard invariants — fail loudly if a forward-return / future-
+    # looking column ever ends up in the feature list. discover_daily_features
+    # already excludes them by name pattern; this is a tripwire for refactors.
+    _LEAK_PREFIXES = ("ret_", "mfe_", "mae_")
+    _LEAK_NAMES = {"ret_5d_adj", "ret_3d_adj", "rank_5d_pct",
+                   "top20_vs_bot20_5d", "top20_strict_5d"}
+    leaky = [f for f in feats
+             if any(f.startswith(p) for p in _LEAK_PREFIXES) or f in _LEAK_NAMES]
+    assert not leaky, f"[LEAK GUARD] Forward-looking columns reached feats: {leaky}"
+    # No duplicate column names in panel.
+    panel_cols = list(panel.columns)
+    assert len(panel_cols) == len(set(panel_cols)), \
+        f"[LEAK GUARD] panel has duplicate columns: " \
+        f"{[c for c in panel_cols if panel_cols.count(c) > 1][:10]}"
     # ---- Explicit model feature contract (OPTION A) ----
     from pathlib import Path
 
     if FEATURES_SCHEMA_PATH and Path(FEATURES_SCHEMA_PATH).exists():
         feats_schema, _ = load_schema(FEATURES_SCHEMA_PATH)
+        # AUDIT-FIX 8: surface schema-vs-panel drift. The previous comparison
+        # in fit_final_model_and_oos_calibration was feats-vs-itself (because
+        # we override `feats = feats_schema` immediately afterwards) and could
+        # never report new features. Compare BEFORE the override so users can
+        # see what the panel produced that the schema is currently ignoring.
+        new_in_panel = [f for f in feats if f not in set(feats_schema)]
+        missing_from_panel = [f for f in feats_schema if f not in set(feats)]
+        if new_in_panel:
+            print(f"[Schema] Panel has {len(new_in_panel)} feature(s) NOT in schema (will be IGNORED):")
+            for f in new_in_panel[:15]:
+                print(f"          - {f}")
+            if len(new_in_panel) > 15:
+                print(f"          ... and {len(new_in_panel)-15} more")
+            print(f"[Schema] To pick them up, delete features_train.json and re-run.")
+        if missing_from_panel:
+            print(f"[Schema] Schema lists {len(missing_from_panel)} feature(s) NOT in panel "
+                  f"(will be filled with train-only impute medians at scoring time):")
+            for f in missing_from_panel[:15]:
+                print(f"          - {f}")
         print(f"[Schema] Using {len(feats_schema)} curated features from features_train.json")
         feats = feats_schema
     else:
