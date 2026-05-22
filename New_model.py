@@ -498,6 +498,70 @@ def last_ts_by_symbol_from_panel(panel_path: str) -> dict:
     except Exception:
         return {}
 
+
+def _rewrite_panel_parquet(panel: pd.DataFrame, out_path: str, chunk_rows: int = 200_000) -> None:
+    """Rewrite the full augmented panel to `out_path`.
+
+    Streams in row-chunks to keep peak memory bounded on large panels.
+    Used at the end of collect_panel_from_paths so the on-disk parquet
+    contains the same columns the model trained on (macros, regime_*,
+    stock_regime, top20_*, ret_5d_adj, etc.). Without this, downstream
+    tools that re-read panel_cache.parquet would crash on missing columns
+    or train against a smaller feature set than the schema claims.
+    """
+    if not _PA_OK:
+        raise SystemExit("pyarrow is required to write panel_cache.parquet. "
+                         "Please run: pip install pyarrow")
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a temp file then atomically rename, so an interruption mid-write
+    # cannot leave behind a half-written panel that downstream tools would
+    # silently load.
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    if tmp.exists():
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+    writer = None
+    schema = None
+    try:
+        n = len(panel)
+        for start in range(0, n, chunk_rows):
+            chunk = panel.iloc[start:start + chunk_rows]
+            table = pa.Table.from_pandas(chunk, preserve_index=False)
+            if writer is None:
+                schema = table.schema
+                writer = pq.ParquetWriter(str(tmp), schema, compression="snappy")
+            else:
+                # Cast to the locked schema so per-chunk dtypes don't drift.
+                try:
+                    table = table.cast(schema)
+                except Exception:
+                    # If a column is genuinely a different type in this chunk
+                    # (rare — possible for object cols with mixed contents),
+                    # let it raise rather than silently coerce.
+                    raise
+            writer.write_table(table)
+        if writer is not None:
+            writer.close()
+            writer = None
+        # Atomic replace
+        os.replace(str(tmp), str(out))
+    except Exception:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+        raise
+
 # ===================== Collect panel =====================
 
 def _prepare_panel_rows(path_obj: Path, min_ts_map: dict):
@@ -642,6 +706,34 @@ def collect_panel_from_paths(paths: List[Path], load_workers: int = 8):
     panel = panel.drop(columns=["date"], errors="ignore")
     # v4: include ALL feature prefixes
     feats = discover_daily_features(panel)
+
+    # ===== v5.1 ROOT-CAUSE FIX: persist augmented panel back to disk =====
+    # The PanelParquetWriter above only saw per-symbol chunks. By design those
+    # chunks have NO macro columns (M_*), no cross-sectional regime columns
+    # (regime_market_trend / regime_high_vol / regime_dispersion), no
+    # stock_regime, no top20_*/ret_5d_adj label-construction columns — all of
+    # those are added in memory in the steps above.
+    #
+    # Without this rewrite, panel_cache.parquet on disk has ~14 fewer columns
+    # than features_train.json claims, and downstream tools (feature_imp,
+    # backtest, ORB) crash on read because they ask for columns that aren't
+    # there. This was the cause of the
+    #   pyarrow.lib.ArrowInvalid: No match for FieldRef.Name(M_nifty_ret)
+    # failure in feature_imp_v5.
+    #
+    # We write in chunks to keep peak memory bounded on large panels.
+    try:
+        print(f"[Panel] Rewriting augmented panel to {PANEL_OUT}: "
+              f"{len(panel):,} rows x {len(panel.columns)} cols")
+        _rewrite_panel_parquet(panel, PANEL_OUT)
+        print(f"[Panel] Augmented panel saved (now matches features_train.json schema).")
+    except Exception as e:
+        # Non-fatal: in-memory panel still works for the rest of run_pipeline,
+        # but downstream tools will see drift. Log loudly.
+        print(f"[Panel] WARNING: failed to rewrite augmented panel: {e!r}")
+        print(f"[Panel] Continuing with in-memory panel; "
+              f"feature_imp/backtest/ORB may see column drift on this run.")
+
     return panel, feats
 
 
