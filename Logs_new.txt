@@ -1,0 +1,202 @@
+[Timing] panel read+sort: 54.9s  (rows=3,548,397)
+[Timing] cross-sectional regime features: 0.9s
+[Macro] Joined 7 macro features; full coverage on 3,548,397 of 3,548,397 rows
+[Timing] macro join: 23.4s
+[Regime] Hard regime label lagged by 1 bar(s) per symbol (known before entry).
+[Regime] Per-stock regime distribution:
+          bull_trend       1,252,123  (35.29%)
+          bull_range         596,749  (16.82%)
+          bear_trend         985,341  (27.77%)
+          bear_range         714,184  (20.13%)
+[Timing] stock regime label + continuous features: 0.8s
+[Label] USE_STRICT_LABEL=False -> skipping strict follow-through label computation (saves a full-panel pass).
+[Schema] Using 191 curated features from features_train.json
+[Panel] final rows=3548397 cols=213 feats=191
+[Train Filter] Upstream liquidity filter (close>=2.0, avg20_vol>=50000): 2,256,803 of 3,406,892 training rows kept
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2609]	valid_0's binary_logloss: 0.684564
+[Train 5D-Quantile-CLS] 1/7 ( 14.3%) ETA 01:40 fold 1
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.678939
+[Train 5D-Quantile-CLS] 2/7 ( 28.6%) ETA 01:59 fold 2
+Training until validation scores don't improve for 800 rounds
+Early stopping, best iteration is:
+[1030]	valid_0's binary_logloss: 0.686935
+[Train 5D-Quantile-CLS] 3/7 ( 42.9%) ETA 01:43 fold 3
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.679615
+[Train 5D-Quantile-CLS] 4/7 ( 57.1%) ETA 01:49 fold 4
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.674653
+[Train 5D-Quantile-CLS] 5/7 ( 71.4%) ETA 01:45 fold 5
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2999]	valid_0's binary_logloss: 0.677081
+[Train 5D-Quantile-CLS] 6/7 ( 85.7%) ETA 01:07 fold 6
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.67651
+[Train 5D-Quantile-CLS] 7/7 (100.0%) ETA 00:00 fold 7
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2999]	valid_0's binary_logloss: 0.675899
+[Schema] No new features. Using existing 191 features
+[OOS] Saved report: C:\Users\karanvsi\Desktop\Kite Connect\v3_2_output_full\oos_report.json
+[Calibration] Saved table: C:\Users\karanvsi\Desktop\Kite Connect\v3_2_output_full\calibration_5d_deciles.json
+
+[Architecture] MODEL_ARCHITECTURE='both'  PRIMARY_ARCHITECTURE='single'  (train specialists: True)
+
+[Regime Models] Training ensembles (original label; specialists=ON)...
+
+[Regime Models] Training FALLBACK / POOLED ensemble: 5 members
+  Preparing training arrays (once for all 5 members)...
+  Prep done in 5.6s  (n_train=523,513, n_cal=235,705, n_test=128,685)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.675977
+  Member 1/5 fit in 193.1s (kept OOS artifacts)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.676007
+  Member 2/5 fit in 188.0s (skipped OOS artifacts)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.676086
+  Member 3/5 fit in 177.2s (skipped OOS artifacts)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2998]	valid_0's binary_logloss: 0.676037
+  Member 4/5 fit in 185.8s (skipped OOS artifacts)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.675911
+  Member 5/5 fit in 178.6s (skipped OOS artifacts)
+[Regime Models] Fallback ensemble trained: 5 members
+
+[Regime Models] bull_trend: 874,570 rows, 348,651 labeled
+  Preparing training arrays...
+  Prep done in 2.3s
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2999]	valid_0's binary_logloss: 0.670327
+  Member 1/5 fit in 69.6s (kept OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2996]	valid_0's binary_logloss: 0.670296
+  Member 2/5 fit in 71.3s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2996]	valid_0's binary_logloss: 0.670235
+  Member 3/5 fit in 75.2s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.670332
+  Member 4/5 fit in 65.6s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.670403
+  Member 5/5 fit in 63.9s (skipped OOS)
+  Trained 5 members for bull_trend
+
+[Regime Models] bull_range: 389,151 rows, 152,732 labeled
+  Preparing training arrays...
+  Prep done in 0.8s
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2588]	valid_0's binary_logloss: 0.68488
+  Member 1/5 fit in 28.6s (kept OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2959]	valid_0's binary_logloss: 0.684998
+  Member 2/5 fit in 26.7s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2663]	valid_0's binary_logloss: 0.684933
+  Member 3/5 fit in 28.8s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2747]	valid_0's binary_logloss: 0.684754
+  Member 4/5 fit in 26.6s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2869]	valid_0's binary_logloss: 0.685137
+  Member 5/5 fit in 30.2s (skipped OOS)
+  Trained 5 members for bull_range
+
+[Regime Models] bear_trend: 592,082 rows, 236,397 labeled
+  Preparing training arrays...
+  Prep done in 1.4s
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2475]	valid_0's binary_logloss: 0.679606
+  Member 1/5 fit in 71.7s (kept OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2601]	valid_0's binary_logloss: 0.679441
+  Member 2/5 fit in 41.2s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2683]	valid_0's binary_logloss: 0.679422
+  Member 3/5 fit in 40.2s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2404]	valid_0's binary_logloss: 0.67919
+  Member 4/5 fit in 39.2s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2523]	valid_0's binary_logloss: 0.679374
+  Member 5/5 fit in 39.5s (skipped OOS)
+  Trained 5 members for bear_trend
+
+[Regime Models] bear_range: 401,000 rows, 155,341 labeled
+  Preparing training arrays...
+  Prep done in 1.3s
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2328]	valid_0's binary_logloss: 0.68446
+  Member 1/5 fit in 27.3s (kept OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[3000]	valid_0's binary_logloss: 0.6847
+  Member 2/5 fit in 30.6s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2527]	valid_0's binary_logloss: 0.68454
+  Member 3/5 fit in 26.1s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2499]	valid_0's binary_logloss: 0.684617
+  Member 4/5 fit in 25.5s (skipped OOS)
+Training until validation scores don't improve for 800 rounds
+Did not meet early stopping. Best iteration is:
+[2301]	valid_0's binary_logloss: 0.684615
+  Member 5/5 fit in 25.8s (skipped OOS)
+  Trained 5 members for bear_range
+
+[Regime Models] Summary:
+  Fallback ensemble: 5 members
+  bull_trend: 5 members
+  bull_range: 5 members
+  bear_trend: 5 members
+  bear_range: 5 members
+
+==============================================================================
+ARCHITECTURE COMPARISON (same embargoed OOS rows)  -- lower Brier / higher IC is better
+==============================================================================
+bucket                n  Brier(single) Brier(regime)   IC(single)  IC(regime)
+OVERALL          128685         0.2436        0.2451       0.1251      0.1028
+bull_trend        36561         0.2426        0.2434       0.1326      0.1466
+bull_range        20427         0.2460        0.2473       0.0904      0.0732
+bear_trend        41123         0.2439        0.2440       0.1069      0.0942
+bear_range        30574         0.2426        0.2471       0.1236      0.0753
+==============================================================================
+Read WITHIN each regime row: if Brier(regime) is not clearly below
+Brier(single) AND IC(regime) not clearly above IC(single), the pooled
+single model wins for that regime (more data, simpler, more stable).
+==============================================================================
+
+[Architecture] Using SINGLE pooled model for export + watchlist.
