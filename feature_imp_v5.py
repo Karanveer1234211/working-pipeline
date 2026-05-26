@@ -91,6 +91,13 @@ warnings.filterwarnings("ignore")
 
 DEFAULT_BASE_DIR = Path(r"C:\Users\karanvsi\Desktop\Kite Connect\v3_2_output_full")
 
+# Macro cache. Override with the MACRO_CACHE_PATH env var if it lives elsewhere.
+import os as _os
+DEFAULT_MACRO_CACHE_PATH = Path(_os.environ.get(
+    "MACRO_CACHE_PATH",
+    r"C:\Users\karanvsi\Desktop\Pycharm\Cache\macro_cache.parquet"
+))
+
 IST = "Asia/Kolkata"
 RET_COL = "ret_5d_oc_pct"
 TARGET_COL = "top20_vs_bot20_5d"
@@ -282,6 +289,122 @@ def get_lgb_booster(model):
 
 
 # =============================================================================
+# Recompute missing in-memory features (mirrors New_model.py post-parquet step)
+# =============================================================================
+
+def _ensure_panel_features(panel: pd.DataFrame, FEATURES: List[str], base_dir: Path) -> pd.DataFrame:
+    """If panel_cache.parquet was written before macros + regime were added,
+    recompute them in memory so feature_imp can run.
+
+    Adds (when missing):
+      - regime_market_trend, regime_high_vol, regime_dispersion
+      - stock_regime
+      - M_* macro features (joined from MACRO_CACHE_PATH if available)
+      - top20_vs_bot20_5d (rebuilt from ret_5d_oc_pct + D_atr14)
+    """
+    panel = panel.copy()
+
+    # 1) Cross-sectional regime (cheap, deterministic)
+    cross_missing = ("regime_market_trend" not in panel.columns
+                     or panel["regime_market_trend"].isna().all())
+    if cross_missing:
+        print("[Recompute] regime_market_trend / regime_high_vol / regime_dispersion")
+        if "ret_1d_close_pct" not in panel.columns or panel["ret_1d_close_pct"].isna().all():
+            panel["ret_1d_close_pct"] = (
+                panel.groupby("symbol", observed=True)["close"].pct_change() * 100
+            )
+        d = panel["timestamp"].dt.normalize()
+        cs_mean = panel.groupby(d)["ret_1d_close_pct"].mean()
+        cs_std = panel.groupby(d)["ret_1d_close_pct"].std()
+        trend = cs_mean.rolling(200, min_periods=50).mean().shift(1)
+        std_lag = cs_std.shift(1)
+        vol_med = cs_std.rolling(250, min_periods=50).median().shift(1)
+        panel["regime_market_trend"] = d.map(trend)
+        panel["regime_high_vol"] = (d.map(std_lag) > d.map(vol_med)).astype("Int64")
+        panel["regime_dispersion"] = d.map(std_lag)
+
+    # 2) Per-stock regime label
+    sr_missing = ("stock_regime" not in panel.columns
+                  or panel["stock_regime"].isna().all())
+    if sr_missing:
+        if "D_sma200" in panel.columns and "D_adx14" in panel.columns:
+            print("[Recompute] stock_regime from D_sma200 + D_adx14")
+            close = pd.to_numeric(panel["close"], errors="coerce")
+            sma200 = pd.to_numeric(panel["D_sma200"], errors="coerce")
+            adx = pd.to_numeric(panel["D_adx14"], errors="coerce")
+            no_signal = sma200.isna() | adx.isna() | close.isna()
+            is_bull = (close > sma200)
+            is_ranging = (adx < 20)
+            regime = pd.Series(pd.NA, index=panel.index, dtype="object")
+            mask_eligible = ~no_signal
+            regime[mask_eligible & is_bull & ~is_ranging] = "bull_trend"
+            regime[mask_eligible & is_bull & is_ranging] = "bull_range"
+            regime[mask_eligible & ~is_bull & ~is_ranging] = "bear_trend"
+            regime[mask_eligible & ~is_bull & is_ranging] = "bear_range"
+            panel["stock_regime"] = regime
+            counts = pd.Series(regime).value_counts(dropna=False)
+            print(f"[Recompute]   regime distribution: {counts.to_dict()}")
+        else:
+            print("[Recompute] stock_regime: D_sma200 or D_adx14 missing — leaving NaN")
+            panel["stock_regime"] = pd.NA
+
+    # 3) Macro features (M_*)
+    macro_feats_in_schema = [f for f in FEATURES if f.startswith("M_")]
+    macro_present = [f for f in macro_feats_in_schema if f in panel.columns]
+    if macro_feats_in_schema and len(macro_present) == 0:
+        macro_path = DEFAULT_MACRO_CACHE_PATH
+        if macro_path.exists():
+            try:
+                macro = pd.read_parquet(macro_path)
+                if "date" not in macro.columns:
+                    print(f"[Macro] {macro_path} has no 'date' column; skipping")
+                else:
+                    macro["date"] = pd.to_datetime(macro["date"]).dt.normalize()
+                    try:
+                        macro["date"] = macro["date"].dt.tz_localize(None)
+                    except Exception:
+                        pass
+                    macro_cols = [c for c in macro.columns if c.startswith("M_")]
+                    print(f"[Macro] Joining {len(macro_cols)} macro features from {macro_path}")
+                    pd_norm = panel["timestamp"].dt.normalize()
+                    if pd_norm.dt.tz is not None:
+                        pd_norm = pd_norm.dt.tz_localize(None)
+                    panel["__join_date"] = pd_norm
+                    panel = panel.merge(
+                        macro[["date"] + macro_cols].rename(columns={"date": "__join_date"}),
+                        on="__join_date", how="left",
+                    ).drop(columns=["__join_date"])
+                    for c in macro_cols:
+                        panel[c] = pd.to_numeric(panel[c], errors="coerce")
+                        panel[c] = panel.groupby("symbol", observed=True)[c].ffill()
+                    cov = panel[macro_cols[0]].notna().sum() if macro_cols else 0
+                    print(f"[Macro]   coverage: {cov:,} / {len(panel):,} rows")
+            except Exception as e:
+                print(f"[Macro] Could not load/join {macro_path}: {e}")
+        else:
+            print(f"[Macro] MACRO_CACHE_PATH not found: {macro_path}")
+            print(f"[Macro] Set MACRO_CACHE_PATH env var if it lives elsewhere; "
+                  f"continuing without M_* features.")
+
+    # 4) Rebuild label if missing
+    if (TARGET_COL not in panel.columns or panel[TARGET_COL].notna().sum() == 0):
+        if RET_COL in panel.columns and "D_atr14" in panel.columns:
+            print(f"[Recompute] {TARGET_COL} from {RET_COL} + ATR%")
+            close = pd.to_numeric(panel["close"], errors="coerce")
+            r5 = pd.to_numeric(panel[RET_COL], errors="coerce")
+            atr_pct = (pd.to_numeric(panel["D_atr14"], errors="coerce") /
+                       close.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan) * 100.0
+            adj = r5 / atr_pct.replace(0, np.nan)
+            d = panel["timestamp"].dt.normalize()
+            rank_pct = adj.groupby(d).rank(method="average", pct=True)
+            panel["rank_5d_pct"] = rank_pct
+            panel[TARGET_COL] = np.where(rank_pct >= 0.80, 1,
+                                         np.where(rank_pct <= 0.20, 0, np.nan))
+
+    return panel
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -297,7 +420,8 @@ def main(base_dir: Path):
     out_dir.mkdir(exist_ok=True)
 
     # -------------------------------------------------------------------------
-    # Load
+    # Load (v5.1: schema-aware — panel may be missing macros/regime if pipeline
+    # didn't persist them back to disk after augmentation)
     # -------------------------------------------------------------------------
     print(f"\n[Load] Panel:    {panel_path}")
     print(f"[Load] Features: {features_path}")
@@ -307,13 +431,32 @@ def main(base_dir: Path):
     GLOBAL_IMPUTE: Dict[str, float] = {k: float(v) for k, v in schema.get("impute", {}).items()}
     print(f"[Load] {len(FEATURES)} features in schema")
 
-    # Project columns to keep memory in check (v5)
-    needed_cols = list(set(FEATURES + [
-        "timestamp", "symbol", "close", "volume",
-        RET_COL, TARGET_COL, "stock_regime", "D_atr14",
-        "ret_5d_close_pct", "ret_3d_close_pct",
-    ]))
-    panel = pd.read_parquet(panel_path, columns=[c for c in needed_cols if c])
+    # Read parquet schema first; only request columns that actually exist.
+    import pyarrow.parquet as _pq
+    parquet_cols = set(_pq.read_schema(panel_path).names)
+
+    needed_extras = ["timestamp", "symbol", "close", "volume",
+                     RET_COL, TARGET_COL, "stock_regime", "D_atr14",
+                     "ret_5d_close_pct", "ret_3d_close_pct", "ret_1d_close_pct",
+                     "regime_market_trend", "regime_high_vol", "regime_dispersion",
+                     "D_sma200", "D_adx14"]
+    requested = list(set(FEATURES + needed_extras))
+    to_load = sorted(c for c in requested if c in parquet_cols)
+    missing_from_parquet = sorted(c for c in requested if c not in parquet_cols)
+
+    if missing_from_parquet:
+        print(f"[Load] {len(missing_from_parquet)} requested columns missing from parquet:")
+        grouped: Dict[str, List[str]] = {}
+        for m in missing_from_parquet:
+            prefix = (m.split("_")[0] + "_") if ("_" in m and not m.startswith("_")) else m
+            grouped.setdefault(prefix, []).append(m)
+        for prefix, lst in sorted(grouped.items()):
+            ex = ", ".join(lst[:3]) + (" ..." if len(lst) > 3 else "")
+            print(f"        {prefix:<10} {len(lst):>3}  ({ex})")
+        print(f"[Load] Will recompute regime_* and stock_regime in memory; "
+              f"will try to join macros from MACRO_CACHE_PATH if available.")
+
+    panel = pd.read_parquet(panel_path, columns=to_load)
     panel["timestamp"] = pd.to_datetime(panel["timestamp"])
     if panel["timestamp"].dt.tz is None:
         panel["timestamp"] = panel["timestamp"].dt.tz_localize("UTC").dt.tz_convert(IST)
@@ -322,6 +465,24 @@ def main(base_dir: Path):
     panel = panel.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
     panel["date"] = panel["timestamp"].dt.normalize()
     panel["year"] = panel["timestamp"].dt.year
+
+    # -------------------------------------------------------------------------
+    # Recompute missing in-memory features (regime cross-section, stock_regime, macros)
+    # Mirrors what New_model.py does AFTER its parquet write.
+    # -------------------------------------------------------------------------
+    panel = _ensure_panel_features(panel, FEATURES, base_dir)
+
+    # If FEATURES still has entries the panel lacks, drop them and warn.
+    still_missing = [f for f in FEATURES if f not in panel.columns]
+    if still_missing:
+        print(f"[Schema] {len(still_missing)} features in features_train.json could not be "
+              f"loaded or recomputed; dropping from analysis:")
+        for f in still_missing[:15]:
+            print(f"          - {f}")
+        if len(still_missing) > 15:
+            print(f"          ... and {len(still_missing)-15} more")
+        FEATURES = [f for f in FEATURES if f in panel.columns]
+        print(f"[Schema] Continuing with {len(FEATURES)} features")
 
     # avg20 vol per symbol
     panel["avg20_vol"] = (
@@ -357,19 +518,13 @@ def main(base_dir: Path):
         fallback_model = load(cls_path)
 
     # -------------------------------------------------------------------------
-    # Build target
+    # Filter to labeled rows (target was already built/re-built in _ensure_panel_features)
     # -------------------------------------------------------------------------
-    if TARGET_COL not in panel.columns or panel[TARGET_COL].notna().sum() == 0:
-        print("[Target] Re-deriving top20_vs_bot20_5d from ret_5d_oc_pct + ATR%")
-        close = pd.to_numeric(panel["close"], errors="coerce")
-        r5 = pd.to_numeric(panel.get(RET_COL), errors="coerce")
-        atr_pct = (pd.to_numeric(panel.get("D_atr14"), errors="coerce") /
-                   close.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan) * 100.0
-        adj = r5 / atr_pct.replace(0, np.nan)
-        panel["rank_5d_pct"] = adj.groupby(panel["date"]).rank(method="average", pct=True)
-        panel[TARGET_COL] = np.where(panel["rank_5d_pct"] >= 0.80, 1,
-                                     np.where(panel["rank_5d_pct"] <= 0.20, 0, np.nan))
-
+    if TARGET_COL not in panel.columns:
+        raise SystemExit(
+            f"[Fatal] {TARGET_COL} could not be built — needs {RET_COL} + D_atr14 in panel. "
+            f"Re-run New_model.py to (re)create the panel with these columns."
+        )
     labeled = panel[panel[TARGET_COL].notna()].copy().reset_index(drop=True)
     print(f"[Target] Labeled rows: {len(labeled):,}")
 

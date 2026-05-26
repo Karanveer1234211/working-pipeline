@@ -3,6 +3,29 @@
 `feature_imp_v5.py` is a drop-in replacement for `feature imp.py` (v4).
 Run it the same way; outputs land in the same directory.
 
+## v5.1 patch (2026-05-22)
+
+Fixes the load-time crash:
+```
+pyarrow.lib.ArrowInvalid: No match for FieldRef.Name(M_nifty_ret) ...
+```
+
+Root cause: `New_model.py` writes `panel_cache.parquet` *before* it joins macros and computes `regime_*` / `stock_regime`, so those columns are in `features_train.json` (186 features) but not in the parquet (~172 features).
+
+v5.1 handles this by:
+
+1. Reading the parquet schema first via `pyarrow.parquet.read_schema` and only requesting columns that actually exist.
+2. Calling a new `_ensure_panel_features()` helper that:
+   - Recomputes `regime_market_trend / regime_high_vol / regime_dispersion` from cross-sectional 1d returns
+   - Recomputes `stock_regime` from `D_sma200` + `D_adx14`, leaving NaN for early-history rows where SMA200/ADX are unknown (fixes the audit issue where early bars wrongly fell into `bear_trend`)
+   - Loads macros from `MACRO_CACHE_PATH` (defaults to `C:\Users\karanvsi\Desktop\Pycharm\Cache\macro_cache.parquet`, override with `MACRO_CACHE_PATH` env var)
+   - Rebuilds `top20_vs_bot20_5d` from `ret_5d_oc_pct` + ATR% if missing
+3. After all recomputation, drops any features still missing from the panel and warns; the rest of the pipeline runs on whatever was successfully loaded/recomputed.
+
+If you set `MACRO_CACHE_PATH` correctly, v5.1 will give you the full 186-feature analysis. If macros aren't reachable, you'll get ~179 features (everything except `M_*`) and a clear warning.
+
+The right long-term fix is in `New_model.py` itself — write the augmented panel back to disk after macros + regime are added — but that's a separate PR.
+
 ## Why v5 exists
 
 v4 produced KEEP / DROP / REVIEW recommendations anchored to an incorrect
